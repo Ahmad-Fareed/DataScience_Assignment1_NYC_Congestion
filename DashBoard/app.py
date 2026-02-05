@@ -6,19 +6,28 @@ st.set_page_config(layout="wide")
 
 st.title("NYC Congestion Pricing Audit Dashboard")
 
-# ---------- Fix paths ----------
+# ---------- Base Path ----------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-monthly_kpis = pd.read_parquet(os.path.join(BASE_DIR, "monthly_kpis.parquet"))
+# ---------- Load Data ----------
+monthly_kpis = pd.read_parquet(
+    os.path.join(BASE_DIR, "monthly_kpis.parquet")
+)
 
 monthly_kpis["month"] = pd.to_datetime(monthly_kpis["month"])
 monthly_kpis = monthly_kpis.sort_values("month")
 
+zone_counts = pd.read_parquet(
+    os.path.join(BASE_DIR, "dashboard_zone_counts.parquet")
+)
 
-zone_counts = pd.read_parquet(os.path.join(BASE_DIR, "dashboard_zone_counts.parquet"))
-leakage = pd.read_parquet(os.path.join(BASE_DIR, "dashboard_leakage.parquet"))
-velocity = pd.read_parquet(os.path.join(BASE_DIR, "velocity_heatmap.parquet"))
+leakage = pd.read_parquet(
+    os.path.join(BASE_DIR, "dashboard_leakage.parquet")
+)
 
+velocity = pd.read_parquet(
+    os.path.join(BASE_DIR, "velocity_heatmap.parquet")
+)
 
 # ---------- KPI Overview ----------
 st.header("Monthly KPIs")
@@ -35,38 +44,70 @@ with col2:
         monthly_kpis.set_index("month")["total_revenue"]
     )
 
-# ---------- Top Pickup Zones ----------
-st.header("Top Pickup Zones")
+# ---------- Tabs ----------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Border Effect Map",
+    "Traffic Flow",
+    "Economics",
+    "Weather Impact"
+])
 
-top_zones = zone_counts.head(10)
-st.bar_chart(top_zones.set_index("pickup_loc")["trip_count"])
+# ---------- TAB 1: Border Effect ----------
+with tab1:
+    st.header("Border Effect Analysis")
 
-# ---------- Leakage Summary ----------
-st.header("Congestion Leakage")
+    border_effect = pd.read_parquet(
+        os.path.join(BASE_DIR, "border_effect.parquet")
+    )
 
-st.dataframe(leakage)
-st.header("Overall Summary")
+    if len(border_effect) == 0:
+        st.warning("No border effect data available.")
+    else:
+        st.dataframe(border_effect)
 
-col1, col2, col3 = st.columns(3)
+    st.info("Trips ending near congestion boundary zones.")
 
-col1.metric("Total Trips",
-            f"{monthly_kpis.total_trips.sum():,.0f}")
+# ---------- TAB 2: Traffic Flow ----------
+with tab2:
+    st.header("Velocity Heatmap")
 
-col2.metric("Total Revenue",
-            f"${monthly_kpis.total_revenue.sum():,.0f}")
+    pivot = velocity.pivot(
+        index="weekday",
+        columns="hour",
+        values="avg_speed"
+    )
 
-col3.metric("Avg Monthly Trips",
-            f"{monthly_kpis.total_trips.mean():,.0f}")
+    st.dataframe(pivot)
 
-# ---------- Velocity Heatmap Data ----------
-st.header("Average Speed by Hour")
+# ---------- TAB 3: Economics ----------
+with tab3:
+    st.header("Tip vs Surcharge Analysis")
 
-pivot = velocity.pivot(
-    index="weekday",
-    columns="hour",
-    values="avg_speed"
-)
+    crowding = pd.read_parquet(
+        os.path.join(BASE_DIR, "crowding_out.parquet")
+    )
 
-st.dataframe(pivot)
+    crowding["month"] = pd.to_datetime(crowding["month"])
+
+    st.line_chart(
+        crowding.set_index("month")[
+            ["avg_surcharge", "avg_tip_ratio"]
+        ]
+    )
+
+# ---------- TAB 4: Weather ----------
+with tab4:
+    st.header("Rain Impact on Taxi Demand")
+
+    rain = pd.read_parquet(
+        os.path.join(BASE_DIR, "rain_tax.parquet")
+    )
+
+    st.dataframe(rain)
+
+    # rainy: 0 = no rain, 1 = rain
+    st.scatter_chart(
+        rain.set_index("rainy")["avg_trips"]
+    )
 
 st.success("Dashboard loaded successfully.")

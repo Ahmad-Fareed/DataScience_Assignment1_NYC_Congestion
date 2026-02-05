@@ -235,7 +235,9 @@ def ghost_trip_filter():
                      (EXTRACT(EPOCH FROM (dropoff_time - pickup_time)) / 3600)
                 ELSE 0
             END AS avg_speed_mph
-        FROM read_parquet('unified_trips.parquet');
+       FROM read_parquet('unified_trips.parquet')
+WHERE EXTRACT(YEAR FROM pickup_time) >= 2023;
+
     """)
 
     print("Detecting ghost trips...")
@@ -300,12 +302,15 @@ def build_congestion_zone_reference():
 
     # Manhattan zones approximation
     con.execute("""
-        CREATE OR REPLACE TABLE congestion_zone AS
-        SELECT LocationID
-        FROM taxi_zones
-        WHERE Borough = 'Manhattan'
-        AND Zone NOT LIKE '%Harlem%'
-        AND Zone NOT LIKE '%Washington Heights%';
+       CREATE OR REPLACE TABLE congestion_zone AS
+SELECT LocationID
+FROM taxi_zones
+WHERE Borough = 'Manhattan'
+AND Zone NOT LIKE '%Harlem%'
+AND Zone NOT LIKE '%Inwood%'
+AND Zone NOT LIKE '%Washington Heights%';
+
+
     """)
 
     # Save reference
@@ -351,7 +356,8 @@ def congestion_leakage_audit():
         WHERE
             p.LocationID IS NULL
             AND d.LocationID IS NOT NULL
-            AND pickup_time >= '2025-01-05';
+            AND EXTRACT(YEAR FROM pickup_time) >= 2024;
+
     """)
 
     # Compliance stats
@@ -611,12 +617,14 @@ def border_effect_analysis():
     # Manhattan zones outside congestion zone
     con.execute("""
         CREATE OR REPLACE TABLE border_zones AS
-        SELECT l.LocationID
-        FROM lookup l
-        LEFT JOIN zones z
-            ON l.LocationID = z.LocationID
-        WHERE l.Borough = 'Manhattan'
-          AND z.LocationID IS NULL;
+SELECT l.LocationID
+FROM lookup l
+LEFT JOIN zones z
+    ON l.LocationID = z.LocationID
+WHERE l.Borough = 'Manhattan'
+AND z.LocationID IS NULL;
+
+
     """)
 
     # Dropoffs in border zones
@@ -627,9 +635,10 @@ def border_effect_analysis():
             EXTRACT(YEAR FROM pickup_time) AS year
         FROM trips t
         JOIN border_zones b
-            ON t.dropoff_loc = b.LocationID
-        WHERE EXTRACT(MONTH FROM pickup_time) IN (1,2,3)
-          AND EXTRACT(YEAR FROM pickup_time) IN (2024, 2025);
+           ON CAST(t.dropoff_loc AS INTEGER) = CAST(b.LocationID AS INTEGER)
+
+       WHERE EXTRACT(YEAR FROM pickup_time) IN (2024, 2025);
+
     """)
 
     # Aggregate counts
@@ -646,16 +655,22 @@ def border_effect_analysis():
     # Compute percent change
     con.execute("""
         CREATE OR REPLACE TABLE border_change AS
-        SELECT
-            a.dropoff_loc,
-            a.trips AS trips_2024,
-            b.trips AS trips_2025,
-            100.0 * (b.trips - a.trips) / a.trips AS percent_change
-        FROM border_counts a
-        JOIN border_counts b
-          ON a.dropoff_loc = b.dropoff_loc
-        WHERE a.year = 2024
-          AND b.year = 2025;
+SELECT
+    COALESCE(a.dropoff_loc, b.dropoff_loc) AS dropoff_loc,
+    COALESCE(a.trips, 0) AS trips_2024,
+    COALESCE(b.trips, 0) AS trips_2025,
+    CASE
+        WHEN COALESCE(a.trips,0) > 0
+        THEN 100.0 * (COALESCE(b.trips,0) - a.trips) / a.trips
+        ELSE NULL
+    END AS percent_change
+FROM
+    (SELECT * FROM border_counts WHERE year = 2024) a
+FULL OUTER JOIN
+    (SELECT * FROM border_counts WHERE year = 2025) b
+ON a.dropoff_loc = b.dropoff_loc;
+
+
     """)
 
     # Save result
@@ -788,18 +803,39 @@ def crowding_out_analysis():
 #---Rain tax Analysis----
 def rain_tax_analysis():
     """
-    Analyze effect of rain on taxi demand.
+    Analyze effect of rain on taxi demand using NYC weather.
     """
 
-    weather_url = "https://raw.githubusercontent.com/vega/vega-datasets/master/data/seattle-weather.csv"
-    weather_path = os.path.join(DATA_FOLDER, "weather.csv")
+    import pandas as pd
 
-    # Download weather data if missing
+    # Central Park, NYC coordinates
+    weather_url = (
+        "https://archive-api.open-meteo.com/v1/archive"
+        "?latitude=40.7812"
+        "&longitude=-73.9665"
+        "&start_date=2024-01-01"
+        "&end_date=2025-12-31"
+        "&daily=precipitation_sum"
+        "&timezone=America/New_York"
+    )
+
+    weather_path = os.path.join(DATA_FOLDER, "ny_weather.parquet")
+
+    # Download weather if missing
     if not os.path.exists(weather_path):
-        print("Downloading weather data...")
-        data = requests.get(weather_url).content
-        with open(weather_path, "wb") as f:
-            f.write(data)
+        print("Downloading NYC weather data...")
+        weather_json = requests.get(weather_url).json()
+
+        weather_df = pd.DataFrame({
+            "trip_date": weather_json["daily"]["time"],
+            "precipitation": weather_json["daily"]["precipitation_sum"]
+        })
+
+        weather_df["trip_date"] = pd.to_datetime(
+            weather_df["trip_date"]
+        ).dt.date
+
+        weather_df.to_parquet(weather_path)
 
     con = duckdb.connect()
 
@@ -820,13 +856,11 @@ def rain_tax_analysis():
         GROUP BY trip_date;
     """)
 
-    # Load weather
+    # Load NYC weather
     con.execute(f"""
         CREATE OR REPLACE TABLE weather AS
-        SELECT
-            DATE(date) AS trip_date,
-            precipitation
-        FROM read_csv_auto('{weather_path}');
+        SELECT *
+        FROM read_parquet('{weather_path}');
     """)
 
     # Join weather and trips
@@ -836,7 +870,7 @@ def rain_tax_analysis():
             d.trip_date,
             d.trip_count,
             CASE
-                WHEN w.precipitation > 0 THEN 1
+                WHEN COALESCE(w.precipitation, 0) > 0 THEN 1
                 ELSE 0
             END AS rainy
         FROM daily_trips d
@@ -862,6 +896,7 @@ def rain_tax_analysis():
     """)
 
     print("Rain tax analysis completed.")
+
 
 # ---------- Pipeline Runner ----------
 def run_ingestion():
@@ -890,8 +925,7 @@ def run_ingestion():
     crowding_out_analysis()
 
     rain_tax_analysis()
-
-
+    
     prepare_dashboard_datasets()
 
 
