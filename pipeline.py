@@ -881,11 +881,12 @@ def rain_tax_analysis():
     # Aggregate rain impact
     con.execute("""
         CREATE OR REPLACE TABLE rain_summary AS
-        SELECT
-            rainy,
-            AVG(trip_count) AS avg_trips
-        FROM rain_analysis
-        GROUP BY rainy;
+SELECT
+    trip_date,
+    rainy,
+    trip_count
+FROM rain_analysis;
+
     """)
 
     # Save result

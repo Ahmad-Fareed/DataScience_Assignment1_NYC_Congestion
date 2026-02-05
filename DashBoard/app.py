@@ -107,7 +107,10 @@ with tab4:
 
     # rainy: 0 = no rain, 1 = rain
     st.scatter_chart(
-        rain.set_index("rainy")["avg_trips"]
-    )
+    rain,
+    x="rainy",
+    y="trip_count"
+)
+
 
 st.success("Dashboard loaded successfully.")
